@@ -1,0 +1,7 @@
+# frappe -- https://github.com/frappe/frappe is installed via 'bench init'
+opencv-python-headless
+numpy
+Pillow
+pdf2image
+pytesseract
+
