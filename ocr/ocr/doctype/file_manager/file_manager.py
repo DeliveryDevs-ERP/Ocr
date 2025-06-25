@@ -309,4 +309,7 @@ def parse_ocr_data(raw):
         return parsed_data
 
     except Exception as e:
-        frappe.msgprint(f"Error parsing OCR data: {e}. Upload new clearer image.")
+        frappe.msgprint(
+            f"Error parsing OCR data: {e}. "
+            "Please upload a clearer image and verify that the cropped area is correctly selected."
+        )
