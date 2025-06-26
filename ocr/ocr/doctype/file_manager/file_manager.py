@@ -240,7 +240,7 @@ def parse_ocr_data(raw):
     if not raw:
         return
 
-    frappe.errprint(f"Passed in RAW: {raw}")
+    # frappe.errprint(f"Passed in RAW: {raw}")
 
     # Split and sanitize lines
     lines = raw.splitlines()
@@ -248,12 +248,18 @@ def parse_ocr_data(raw):
 
     # MRZ line matcher
     def is_mrz_line(line):
-        return len(line.strip()) >= 40 and re.match(r'^[A-Z0-9<]+$', line.strip()) is not None
+        return len(line.strip()) >= 40 and re.match(r'^[A-Za-z0-9<]+$', line.strip()) is not None
+
+    # frappe.errprint(f"Passed in lines : {lines}")
 
     # Try to detect two consecutive MRZ lines
     line1, line2 = None, None
     for i in range(len(lines) - 1):
+        # frappe.errprint(f"Check LINE 2 index {lines[i][:2]}")
         if is_mrz_line(lines[i]) and is_mrz_line(lines[i + 1]):
+            line1 = lines[i]
+            line2 = lines[i + 1]
+        elif line1 is None and lines[i][:2] in ['P<', 'D<', 'S<', 'F<']:
             line1 = lines[i]
             line2 = lines[i + 1]
             break
@@ -278,7 +284,8 @@ def parse_ocr_data(raw):
         first_name = line1.split("<<")[1].split("<")[0]
 
         # Passport Number: first 9 chars of line2
-        passport_number = line2[:9]
+        passport_number_raw = line2[:9]
+        passport_number = ''.join(filter(str.isalnum, passport_number_raw))
 
         # Date of Birth (YYMMDD)
         dob_str = line2[13:19]
@@ -298,7 +305,8 @@ def parse_ocr_data(raw):
             expiry = ''
 
         # CNIC (if applicable): fallback field — adjust as per local layout
-        cnic = line2[28:41] if len(line2) >= 41 else ''
+        cnic_raw = line2[28:41] if len(line2) >= 41 else ''
+        cnic = ''.join(filter(str.isdigit, cnic_raw))
 
         parsed_data = {
             "passport_type": passport_type,
