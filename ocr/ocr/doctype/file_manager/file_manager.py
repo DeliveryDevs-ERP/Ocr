@@ -226,8 +226,12 @@ def scan_passport(file_url):
                 # new = preprocess_image(img)
                 custom_config = r'--oem 3 --psm 6'
                 raw = pytesseract.image_to_string(img, config=custom_config)
-                dicts = parse_ocr_data(raw)
-                return frappe._dict(dicts)
+                parsed_data = parse_ocr_data(raw)
+                if not parsed_data:
+                    frappe.msgprint("OCR parsing failed. Please check the image quality or try a different passport scan.")
+                    return
+
+                return frappe._dict(parsed_data), raw
         except Exception as e:
             frappe.msgprint(f'Error in file. {e}')
     
@@ -236,76 +240,78 @@ def parse_ocr_data(raw):
     if not raw:
         return
 
-    # Example OCR response:
-    # P<PAKALI<<RAHMAH<<<<<<<L<LLLLLLLLLLLLLLLLLL<LK
-    # MA18358115PAK2208109F28052324220121655812<58
-    # frappe.errprint(f"raw {raw[-100:]}")
-    # frappe.errprint(f"raw lines {raw[-100:].splitlines()}")
-    # Split the response into lines
-    lines = raw[-100:].splitlines()
-    if len(lines) < 2:
-        frappe.msgprint("Invalid OCR response format.")
+    frappe.errprint(f"Passed in RAW: {raw}")
+
+    # Split and sanitize lines
+    lines = raw.splitlines()
+    lines = [line.strip() for line in lines if len(line.strip()) > 0]
+
+    # MRZ line matcher
+    def is_mrz_line(line):
+        return len(line.strip()) >= 40 and re.match(r'^[A-Z0-9<]+$', line.strip()) is not None
+
+    # Try to detect two consecutive MRZ lines
+    line1, line2 = None, None
+    for i in range(len(lines) - 1):
+        if is_mrz_line(lines[i]) and is_mrz_line(lines[i + 1]):
+            line1 = lines[i]
+            line2 = lines[i + 1]
+            break
+
+    if not line1 or not line2:
+        frappe.msgprint("Could not detect MRZ lines from OCR output. Please upload a clearer image.")
         return
 
-    line1 = lines[1]  # P<PAKALI<<RAHMAH<<<<<<<L<LLLLLLLLLLLLLLLLLL<LK
-    line2 = lines[2]  # MA18358115PAK2208109F28052324220121655812<58
-    # frappe.errprint(f"len line1 {len(line1)}")
-    # frappe.errprint(f"len line2 {len(line2)}")
-    if len(line1) < 15 or len(line2) <15 :
-        line1 = lines[2]
-        line2 = lines[3]
-
-
-    # frappe.errprint(f"line1 {line1}")
-    # frappe.errprint(f"line2 {line2}")
-    # Extract fields
     try:
-        # Passport Type (P)
+        # Passport Type (first character of line1)
         passport_type = line1[0]
 
-        # Last Name (PAKALI)
-        # Nationality (PAK)
+        # Nationality (3-letter ISO in line2 at index 10–13)
         nationality = line2[10:13]
-            
+
+        # Last Name: between start and '<<'
+        # last_name = line1.split("<<")[0][1:]  # skip 1st char (type)
         last_name = line1.split("<<")[0][1:].split(nationality)[-1]  # Remove 'P<' and take until '<<'
 
-        # First Name (RAHMAH)
+
+        # First Name: between first and second '<' group after '<<'
         first_name = line1.split("<<")[1].split("<")[0]
 
-        # Passport Number (MA18358115)
+        # Passport Number: first 9 chars of line2
         passport_number = line2[:9]
 
-        # Date of Birth (220810 -> 10-08-2022)
-        dob_str = line2[13:19]  # YYMMDD format
+        # Date of Birth (YYMMDD)
+        dob_str = line2[13:19]
         try:
             dob = datetime.strptime(dob_str, "%y%m%d").strftime("%d-%m-%Y")
         except:
             dob = ''
 
-        # Sex (F)
+        # Sex: 1 char at index 20
         sex = line2[20]
 
-        # Date of Expiry (280523 -> 23-05-2028)
-        expiry_str = line2[21:27]  # YYMMDD format
+        # Expiry Date (YYMMDD)
+        expiry_str = line2[21:27]
         try:
             expiry = datetime.strptime(expiry_str, "%y%m%d").strftime("%d-%m-%Y")
         except:
             expiry = ''
-        # CNIC Number (4220121655812)
-        cnic = line2[28:41]
 
-        # Create a dictionary with the extracted data
+        # CNIC (if applicable): fallback field — adjust as per local layout
+        cnic = line2[28:41] if len(line2) >= 41 else ''
+
         parsed_data = {
             "passport_type": passport_type,
             "last_name": last_name,
             "first_name": first_name,
             "passport_number": passport_number,
             "nationality": nationality,
-            "date_of_birth": getdate(dob),
+            "date_of_birth": getdate(dob) if dob else None,
             "sex": sex,
-            "date_of_expiry": getdate(expiry),
+            "date_of_expiry": getdate(expiry) if expiry else None,
             "cnic": cnic
         }
+
         return parsed_data
 
     except Exception as e:
