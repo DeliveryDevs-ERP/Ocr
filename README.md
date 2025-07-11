@@ -155,19 +155,9 @@ print(raw)
 
 ### Before OCR ➡️ After OCR
 
-| Raw Scan                                                                                                                                    | Extracted Data |
-| :------------------------------------------------------------------------------------------------------------------------------------------ | :------------- |
-| ![Passport Scan](https://upload.wikimedia.org/wikipedia/commons/7/74/United_States_Next_Generation_Passport_signature_and_biodata_page.jpg) | \`\`\`json     |
-| {                                                                                                                                           |                |
-| "first\_name": "HAPPY",                                                                                                                     |                |
-| "last\_name": "TRAVELER",                                                                                                                   |                |
-| "passport\_number": "E00009349",                                                                                                            |                |
-| "sex": "M",                                                                                                                                 |                |
-| "date\_of\_birth": "1965-02-05",                                                                                                            |                |
-| "nationality": "USA"                                                                                                                        |                |
-| }                                                                                                                                           |                |
-
-```|
+| Raw Scan                                                                                                                                    |                                   Extracted Data                                   |
+| :------------------------------------------------------------------------------------------------------------------------------------------ | :--------------------------------------------------------------------------------: |
+| ![Passport Scan](https://en.wikipedia.org/wiki/United_States_passport#/media/File:United_States_Next_Generation_Passport_signature_and_biodata_page.jpg) | `json{"first_name": "JOHN", "last_name": "SMITH", "passport_number": "AB1234567"}` |
 
 ---
 
@@ -178,11 +168,13 @@ print(raw)
 Extracts structured data from passport files.
 
 **Parameters:**
-- `file_url` (string): Path to the uploaded file
+
+* `file_url` (string): Path to the uploaded file
 
 **Returns:**
-- `parsed_data` (dict): Structured fields
-- `raw_text` (string): Full OCR output
+
+* `parsed_data` (dict): Structured fields
+* `raw_text` (string): Full OCR output
 
 ---
 
@@ -199,6 +191,5 @@ We welcome contributions of all kinds! Feel free to open issues or submit PRs.
 ---
 
 ---
-*© 2025 Deliverydevs. Licensed under MIT.*
 
-```
+*© 2025 Deliverydevs. Licensed under MIT.*
