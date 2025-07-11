@@ -4,4 +4,5 @@ numpy
 Pillow
 pdf2image
 pytesseract
-
+google-generativeai
+python-dotenv
