@@ -74,6 +74,7 @@ class FileManager(Document):
                 "date_of_birth": "DD-MM-YYYY",
                 "sex": "M or F",
                 "date_of_expiry": "DD-MM-YYYY",
+                "date_of_issue": "DD-MM-YYYY",
                 "cnic": "string (if available)"
             }}
             
@@ -82,6 +83,7 @@ class FileManager(Document):
             
             Instructions:
             - Extract information from raw data and MRZ (Machine Readable Zone) lines if present
+            - Look for date of issue in the passport data (usually labeled as "Date of Issue", "Issue Date", "Issued", etc.)
             - If dates are in YYMMDD format, convert to DD-MM-YYYY
             - Clean up any OCR errors in names and numbers
             - Return only the JSON object, no additional text
@@ -101,17 +103,13 @@ class FileManager(Document):
             parsed_data = json.loads(json_text)
             
             # Convert date strings to date objects for Frappe
-            if parsed_data.get('date_of_birth'):
-                try:
-                    parsed_data['date_of_birth'] = getdate(parsed_data['date_of_birth'])
-                except:
-                    parsed_data['date_of_birth'] = None
-                    
-            if parsed_data.get('date_of_expiry'):
-                try:
-                    parsed_data['date_of_expiry'] = getdate(parsed_data['date_of_expiry'])
-                except:
-                    parsed_data['date_of_expiry'] = None
+            date_fields = ['date_of_birth', 'date_of_expiry', 'date_of_issue']
+            for field in date_fields:
+                if parsed_data.get(field):
+                    try:
+                        parsed_data[field] = getdate(parsed_data[field])
+                    except:
+                        parsed_data[field] = None
             
             return parsed_data
             
@@ -259,6 +257,7 @@ def parse_with_gemini_api(raw_ocr_text):
         3. Convert dates from YYMMDD to DD-MM-YYYY format
         4. Clean up passport numbers and remove extra characters
         5. Extract 3-letter nationality codes (ISO format)
+        6. Look for date of issue (may be labeled as "Date of Issue", "Issue Date", "Issued", etc.)
         
         Return ONLY a JSON object with this exact structure:
         {{
@@ -270,6 +269,7 @@ def parse_with_gemini_api(raw_ocr_text):
             "date_of_birth": "",
             "sex": "",
             "date_of_expiry": "",
+            "date_of_issue": "",
             "cnic": ""
         }}
         
@@ -289,7 +289,9 @@ def parse_with_gemini_api(raw_ocr_text):
         if json_text.startswith('json'):
             json_text = json_text[4:].strip()
         parsed_data = json.loads(json_text)
-        date_fields = ['date_of_birth', 'date_of_expiry']
+        
+        # Convert date strings to date objects for Frappe
+        date_fields = ['date_of_birth', 'date_of_expiry', 'date_of_issue']
         for field in date_fields:
             if parsed_data.get(field):
                 try:
@@ -308,7 +310,7 @@ def parse_with_gemini_api(raw_ocr_text):
 
 def parse_ocr_data(raw):
     """
-    Original parsing function - kept as fallback
+    Original parsing function - kept as fallback with date_of_issue extraction
     """
     if not raw:
         return
@@ -318,6 +320,35 @@ def parse_ocr_data(raw):
 
     def is_mrz_line(line):
         return len(line.strip()) >= 40 and re.match(r'^[A-Za-z0-9<]+$', line.strip()) is not None
+
+    # Extract date of issue from text before MRZ processing
+    date_of_issue = None
+    for line in lines:
+        # Look for common date of issue patterns
+        issue_patterns = [
+            r'(?:Date of Issue|Issue Date|Issued|Date of Issuance)[:\s]*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
+            r'(?:Date of Issue|Issue Date|Issued|Date of Issuance)[:\s]*(\d{1,2}\s+\w+\s+\d{2,4})',
+            r'(?:Date of Issue|Issue Date|Issued|Date of Issuance)[:\s]*(\d{2}\d{2}\d{2})',
+        ]
+        
+        for pattern in issue_patterns:
+            match = re.search(pattern, line, re.IGNORECASE)
+            if match:
+                date_str = match.group(1)
+                try:
+                    # Try different date formats
+                    for fmt in ['%d-%m-%Y', '%d/%m/%Y', '%d-%m-%y', '%d/%m/%y', '%y%m%d', '%d %B %Y', '%d %b %Y']:
+                        try:
+                            date_of_issue = datetime.strptime(date_str, fmt).strftime("%d-%m-%Y")
+                            break
+                        except:
+                            continue
+                    if date_of_issue:
+                        break
+                except:
+                    continue
+        if date_of_issue:
+            break
 
     line1, line2 = None, None
     for i in range(len(lines) - 1):
@@ -367,6 +398,7 @@ def parse_ocr_data(raw):
             "date_of_birth": getdate(dob) if dob else None,
             "sex": sex,
             "date_of_expiry": getdate(expiry) if expiry else None,
+            "date_of_issue": getdate(date_of_issue) if date_of_issue else None,
             "cnic": cnic
         }
 
