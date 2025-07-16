@@ -83,7 +83,9 @@ class FileManager(Document):
             
             Instructions:
             - Extract information from raw data and MRZ (Machine Readable Zone) lines if present
-            - Look for date of issue in the passport data (usually labeled as "Date of Issue", "Issue Date", "Issued", etc.)
+            - Look for date of issue in various formats like "DD MMM YYYY", or with labels like "Date of Issue", "Issue Date", "Issued", etc.
+            - Identify dates by context - typically issue date comes before expiry date in passport text
+            - Handle formats like "DD MMM YYYY" (e.g., "06 OCT 2023") and convert to DD-MM-YYYY
             - If dates are in YYMMDD format, convert to DD-MM-YYYY
             - Clean up any OCR errors in names and numbers
             - Return only the JSON object, no additional text
@@ -257,7 +259,9 @@ def parse_with_gemini_api(raw_ocr_text):
         3. Convert dates from YYMMDD to DD-MM-YYYY format
         4. Clean up passport numbers and remove extra characters
         5. Extract 3-letter nationality codes (ISO format)
-        6. Look for date of issue (may be labeled as "Date of Issue", "Issue Date", "Issued", etc.)
+        6. Look for date of issue - it may appear in various formats like "DD MMM YYYY", or with labels like "Date of Issue", "Issue Date", "Issued", etc.
+        7. Identify dates by context - typically issue date comes before expiry date in passport text
+        8. Handle formats like "DD MMM YYYY" (e.g., "06 OCT 2023") and convert to DD-MM-YYYY
         
         Return ONLY a JSON object with this exact structure:
         {{
@@ -323,8 +327,10 @@ def parse_ocr_data(raw):
 
     # Extract date of issue from text before MRZ processing
     date_of_issue = None
+    all_dates = []
+    
     for line in lines:
-        # Look for common date of issue patterns
+        # Look for common date of issue patterns with labels
         issue_patterns = [
             r'(?:Date of Issue|Issue Date|Issued|Date of Issuance)[:\s]*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
             r'(?:Date of Issue|Issue Date|Issued|Date of Issuance)[:\s]*(\d{1,2}\s+\w+\s+\d{2,4})',
@@ -349,6 +355,49 @@ def parse_ocr_data(raw):
                     continue
         if date_of_issue:
             break
+    
+    # If no labeled date found, look for date patterns in the text
+    if not date_of_issue:
+        date_patterns = [
+            r'(\d{1,2}\s+(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+\d{4})',  # 06 OCT 2023
+            r'(\d{1,2}[-/]\d{1,2}[-/]\d{4})',  # DD-MM-YYYY or DD/MM/YYYY
+            r'(\d{1,2}[-/]\d{1,2}[-/]\d{2})',  # DD-MM-YY or DD/MM/YY
+        ]
+        
+        for line in lines:
+            for pattern in date_patterns:
+                matches = re.findall(pattern, line, re.IGNORECASE)
+                for match in matches:
+                    try:
+                        # Try different date formats
+                        date_formats = ['%d %b %Y', '%d %B %Y', '%d-%m-%Y', '%d/%m/%Y', '%d-%m-%y', '%d/%m/%y']
+                        for fmt in date_formats:
+                            try:
+                                parsed_date = datetime.strptime(match, fmt)
+                                formatted_date = parsed_date.strftime("%d-%m-%Y")
+                                all_dates.append((formatted_date, parsed_date))
+                                break
+                            except:
+                                continue
+                    except:
+                        continue
+        
+        # If we found dates, try to identify which one might be the issue date
+        if all_dates:
+            # Sort dates by date value
+            all_dates.sort(key=lambda x: x[1])
+            
+            # Look for a date that's likely to be issue date (usually comes before expiry)
+            # In most cases, if we have 2 dates, the earlier one is likely the issue date
+            if len(all_dates) >= 2:
+                date_of_issue = all_dates[0][0]  # Take the earliest date
+            elif len(all_dates) == 1:
+                # If only one date found and it's reasonable for issue date, use it
+                date_obj = all_dates[0][1]
+                current_year = datetime.now().year
+                # Issue date should be within reasonable range (not too old, not in future)
+                if date_obj.year >= (current_year - 10) and date_obj.year <= current_year:
+                    date_of_issue = all_dates[0][0]
 
     line1, line2 = None, None
     for i in range(len(lines) - 1):
