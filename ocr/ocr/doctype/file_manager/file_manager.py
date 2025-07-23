@@ -1,6 +1,3 @@
-# Copyright (c) 2023, zw and contributors
-# For license information, please see license.txt
-
 import frappe
 from frappe.model.document import Document
 import cv2
@@ -33,22 +30,133 @@ class FileManager(Document):
                     text = ""
                     for page in doc:
                         text += pytesseract.image_to_string(page)
-                    self.scanned_contents = text
+                    
+                    # First try MRZ parsing, then enhance with Gemini
+                    mrz_data = parse_ocr_data(text)
+                    if mrz_data:
+                        enhanced_data = self.enhance_with_gemini(mrz_data, text)
+                        self.scanned_contents = str(enhanced_data) if enhanced_data else str(mrz_data)
+                    else:
+                        # Fallback to direct Gemini parsing
+                        parsed_data = self.parse_with_gemini(text)
+                        self.scanned_contents = str(parsed_data) if parsed_data else text
                 else:
                     img = cv2.imread(path)
                     new = self.preprocess_image(img)
                     custom_config = r'--oem 3 --psm 6'
                     raw = pytesseract.image_to_string(img, config=custom_config)
                     
-                    # Use Gemini API to parse OCR data
-                    parsed_data = self.parse_with_gemini(raw)
-                    self.scanned_contents = str(parsed_data) if parsed_data else raw
+                    # First try MRZ parsing, then enhance with Gemini
+                    mrz_data = parse_ocr_data(raw)
+                    if mrz_data:
+                        enhanced_data = self.enhance_with_gemini(mrz_data, raw)
+                        self.scanned_contents = str(enhanced_data) if enhanced_data else str(mrz_data)
+                    else:
+                        # Fallback to direct Gemini parsing
+                        parsed_data = self.parse_with_gemini(raw)
+                        self.scanned_contents = str(parsed_data) if parsed_data else raw
             except Exception as e:
                 frappe.msgprint(f'Error in file. {e}')
 
+    def enhance_with_gemini(self, mrz_data, raw_ocr_text):
+        """
+        Send MRZ-extracted data + raw OCR text to Gemini to fill missing fields
+        """
+        try:
+            # Configure Gemini API
+            api_key = os.getenv('GEMINI_API_KEY')
+            if not api_key:
+                frappe.msgprint("Gemini API key not found in environment variables.")
+                return mrz_data
+                
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel('gemini-2.0-flash')
+            
+            # Convert dates back to string format for JSON serialization
+            mrz_data_for_prompt = mrz_data.copy()
+            date_fields = ['date_of_birth', 'date_of_expiry', 'date_of_issue']
+            for field in date_fields:
+                if mrz_data_for_prompt.get(field):
+                    if isinstance(mrz_data_for_prompt[field], datetime):
+                        mrz_data_for_prompt[field] = mrz_data_for_prompt[field].strftime("%d-%m-%Y")
+                    elif hasattr(mrz_data_for_prompt[field], 'strftime'):
+                        mrz_data_for_prompt[field] = mrz_data_for_prompt[field].strftime("%d-%m-%Y")
+            
+            prompt = f"""
+            I have already extracted basic passport information using MRZ parsing. Please enhance this data by finding missing information from the raw OCR text.
+            
+            Current extracted data (from MRZ):
+            {json.dumps(mrz_data_for_prompt, indent=2)}
+            
+            Please analyze the raw OCR text below and fill in any missing fields, especially:
+            - date_of_issue (if empty)
+            - father_name (extract father's name if mentioned)
+            - place_of_stay (extract place of stay/address if mentioned)
+            
+            Keep all existing MRZ data intact and only add/update missing fields.
+            
+            Return the enhanced JSON object with this structure:
+            {{
+                "passport_type": "existing or extracted value",
+                "last_name": "existing or extracted value",
+                "first_name": "existing or extracted value", 
+                "passport_number": "existing or extracted value",
+                "nationality": "existing or extracted value",
+                "date_of_birth": "existing or extracted value (DD-MM-YYYY)",
+                "sex": "existing or extracted value",
+                "date_of_expiry": "existing or extracted value (DD-MM-YYYY)",
+                "date_of_issue": "extract if missing (DD-MM-YYYY)",
+                "cnic": "existing or extracted value",
+                "father_name": "extract father's name if available",
+                "place_of_stay": "extract place of stay/address if available"
+            }}
+            
+            Raw OCR Text to analyze for missing information:
+            {raw_ocr_text}
+            
+            Instructions:
+            - Preserve all existing MRZ data
+            - Look for date of issue in various formats like "DD MMM YYYY", or with labels like "Date of Issue", "Issue Date", "Issued", etc.
+            - Look for father's name which might appear as "Father's Name:", "Father:", "S/O", "Son of", etc.
+            - Look for place of stay/address information
+            - Handle date formats like "DD MMM YYYY" (e.g., "06 OCT 2023") and convert to DD-MM-YYYY
+            - Return only the JSON object, no additional text
+            - If a field cannot be determined, keep existing value or use empty string ""
+            """
+            
+            response = model.generate_content(prompt)
+            
+            # Parse the JSON response
+            json_text = response.text.strip()
+            # Remove markdown code blocks if present
+            if json_text.startswith('```'):
+                json_text = json_text.split('```')[1]
+                if json_text.startswith('json'):
+                    json_text = json_text[4:]
+            
+            enhanced_data = json.loads(json_text)
+            
+            # Convert date strings back to date objects for Frappe
+            date_fields = ['date_of_birth', 'date_of_expiry', 'date_of_issue']
+            for field in date_fields:
+                if enhanced_data.get(field):
+                    try:
+                        enhanced_data[field] = getdate(enhanced_data[field])
+                    except:
+                        enhanced_data[field] = None
+            
+            return enhanced_data
+            
+        except json.JSONDecodeError:
+            frappe.msgprint("Error: Gemini returned invalid JSON format. Using MRZ data only.")
+            return mrz_data
+        except Exception as e:
+            frappe.msgprint(f"Error calling Gemini API for enhancement: {str(e)}. Using MRZ data only.")
+            return mrz_data
+
     def parse_with_gemini(self, raw_ocr_text):
         """
-        Send raw OCR text to Gemini API for structured parsing
+        Send raw OCR text to Gemini API for structured parsing (fallback method)
         """
         try:
             # Configure Gemini API
@@ -75,7 +183,9 @@ class FileManager(Document):
                 "sex": "M or F",
                 "date_of_expiry": "DD-MM-YYYY",
                 "date_of_issue": "DD-MM-YYYY",
-                "cnic": "string (if available)"
+                "cnic": "string (if available)",
+                "father_name": "string (if available)",
+                "place_of_stay": "string (if available)"
             }}
             
             OCR Text:
@@ -84,6 +194,8 @@ class FileManager(Document):
             Instructions:
             - Extract information from raw data and MRZ (Machine Readable Zone) lines if present
             - Look for date of issue in various formats like "DD MMM YYYY", or with labels like "Date of Issue", "Issue Date", "Issued", etc.
+            - Look for father's name which might appear as "Father's Name:", "Father:", "S/O", "Son of", etc.
+            - Look for place of stay/address information
             - Identify dates by context - typically issue date comes before expiry date in passport text
             - Handle formats like "DD MMM YYYY" (e.g., "06 OCT 2023") and convert to DD-MM-YYYY
             - If dates are in YYMMDD format, convert to DD-MM-YYYY
@@ -190,7 +302,7 @@ class FileManager(Document):
 @frappe.whitelist()
 def scan_passport(file_url):
     """
-    Updated scan_passport function using Gemini API
+    Updated scan_passport function: MRZ first, then Gemini enhancement
     """
     path = os.getcwd()
     site = cstr(frappe.local.site)
@@ -206,28 +318,32 @@ def scan_passport(file_url):
                 for page in doc:
                     text += pytesseract.image_to_string(page)
                 
-                # Use Gemini for PDF text parsing too
-                try:
+                # First extract using MRZ parsing
+                mrz_data = parse_ocr_data(text)
+                if mrz_data:
+                    # Enhance with Gemini to fill missing fields
+                    enhanced_data = enhance_with_gemini_api(mrz_data, text)
+                    return frappe._dict(enhanced_data), text
+                else:
+                    # Fallback to direct Gemini parsing
                     parsed_data = parse_with_gemini_api(text)
-                except:
-                    parsed_data = parse_ocr_data(text)
-                return parsed_data, text
+                    return frappe._dict(parsed_data) if parsed_data else None, text
                 
             else:
                 img = cv2.imread(path)
                 custom_config = r'--oem 3 --psm 6'
                 raw = pytesseract.image_to_string(img, config=custom_config)
                 
-                try:
+                # First extract using MRZ parsing
+                mrz_data = parse_ocr_data(raw)
+                if mrz_data:
+                    # Enhance with Gemini to fill missing fields
+                    enhanced_data = enhance_with_gemini_api(mrz_data, raw)
+                    return frappe._dict(enhanced_data), raw
+                else:
+                    # Fallback to direct Gemini parsing
                     parsed_data = parse_with_gemini_api(raw)
-                except:
-                    parsed_data = parse_ocr_data(raw)
-                
-                if not parsed_data:
-                    frappe.msgprint("OCR parsing failed. Please check the image quality or try a different passport scan.")
-                    return None, raw
-
-                return frappe._dict(parsed_data), raw
+                    return frappe._dict(parsed_data) if parsed_data else None, raw
                 
         except Exception as e:
             frappe.msgprint(f'Error in file: {e}')
@@ -235,9 +351,104 @@ def scan_passport(file_url):
     
     return None, None
 
+def enhance_with_gemini_api(mrz_data, raw_ocr_text):
+    """
+    Standalone function to enhance MRZ data with Gemini API
+    """
+    try:
+        api_key = os.getenv('GEMINI_API_KEY')
+        if not api_key:
+            frappe.msgprint("Gemini API key not found. Using MRZ data only.")
+            return mrz_data
+            
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-2.0-flash')
+        
+        # Convert dates to string format for JSON serialization
+        mrz_data_for_prompt = mrz_data.copy()
+        date_fields = ['date_of_birth', 'date_of_expiry', 'date_of_issue']
+        for field in date_fields:
+            if mrz_data_for_prompt.get(field):
+                if isinstance(mrz_data_for_prompt[field], datetime):
+                    mrz_data_for_prompt[field] = mrz_data_for_prompt[field].strftime("%d-%m-%Y")
+                elif hasattr(mrz_data_for_prompt[field], 'strftime'):
+                    mrz_data_for_prompt[field] = mrz_data_for_prompt[field].strftime("%d-%m-%Y")
+        
+        prompt = f"""
+        I have already extracted passport information using MRZ (Machine Readable Zone) parsing. 
+        Please enhance this data by analyzing the raw OCR text to find missing information.
+        
+        Current MRZ-extracted data:
+        {json.dumps(mrz_data_for_prompt, indent=2)}
+        
+        Please find and add these missing fields from the raw OCR text:
+        1. date_of_issue (if missing or empty)
+        2. father_name (look for patterns like "Father's Name:", "Father:", "S/O", "Son of", etc.)
+        3. place_of_stay (look for address/place of stay information)
+        
+        IMPORTANT: Keep ALL existing MRZ data intact. Only add/update missing fields.
+        
+        Return the enhanced JSON object with this exact structure:
+        {{
+            "passport_type": "preserve existing value",
+            "last_name": "preserve existing value",
+            "first_name": "preserve existing value", 
+            "passport_number": "preserve existing value",
+            "nationality": "preserve existing value",
+            "date_of_birth": "preserve existing value (DD-MM-YYYY)",
+            "sex": "preserve existing value",
+            "date_of_expiry": "preserve existing value (DD-MM-YYYY)",
+            "date_of_issue": "find if missing (DD-MM-YYYY)",
+            "cnic": "preserve existing value",
+            "father_name": "extract if available",
+            "place_of_stay": "extract if available"
+        }}
+        
+        Raw OCR Text to search for missing information:
+        {raw_ocr_text}
+        
+        Guidelines for extraction:
+        - Look for date of issue in formats: "DD MMM YYYY", "DD-MM-YYYY", "DD/MM/YYYY"
+        - Date of issue labels: "Date of Issue", "Issue Date", "Issued", "Date of Issuance"
+        - Father's name patterns: "Father's Name:", "Father:", "S/O", "Son of", "Father Name"
+        - Place of stay patterns: "Place of Stay", "Address", "Residence", location information
+        - Convert dates to DD-MM-YYYY format
+        - Return only the JSON object, no additional text
+        """
+        
+        response = model.generate_content(prompt)
+        json_text = response.text.strip()
+        
+        if json_text.startswith('```'):
+            lines = json_text.split('\n')
+            json_text = '\n'.join(lines[1:-1])
+        
+        if json_text.startswith('json'):
+            json_text = json_text[4:].strip()
+            
+        enhanced_data = json.loads(json_text)
+        
+        # Convert date strings back to date objects for Frappe
+        date_fields = ['date_of_birth', 'date_of_expiry', 'date_of_issue']
+        for field in date_fields:
+            if enhanced_data.get(field):
+                try:
+                    enhanced_data[field] = getdate(enhanced_data[field])
+                except:
+                    enhanced_data[field] = None
+        
+        return enhanced_data
+        
+    except json.JSONDecodeError as e:
+        frappe.msgprint(f"Error parsing Gemini enhancement response: {str(e)}. Using MRZ data only.")
+        return mrz_data
+    except Exception as e:
+        frappe.msgprint(f"Error calling Gemini API for enhancement: {str(e)}. Using MRZ data only.")
+        return mrz_data
+
 def parse_with_gemini_api(raw_ocr_text):
     """
-    Standalone function to parse OCR text with Gemini API
+    Standalone function to parse OCR text with Gemini API (fallback method)
     """
     try:
         api_key = os.getenv('GEMINI_API_KEY')
@@ -248,20 +459,8 @@ def parse_with_gemini_api(raw_ocr_text):
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-2.0-flash')
         
-        # Enhanced prompt for better passport data extraction
         prompt = f"""
-        You are an expert at extracting passport information from OCR text. 
-        Analyze the following OCR text and extract passport data into a structured JSON format.
-        
-        The text may contain OCR errors, extra characters, or formatting issues. Please:
-        1. Identify MRZ (Machine Readable Zone) lines if present
-        2. Extract accurate information despite OCR errors
-        3. Convert dates from YYMMDD to DD-MM-YYYY format
-        4. Clean up passport numbers and remove extra characters
-        5. Extract 3-letter nationality codes (ISO format)
-        6. Look for date of issue - it may appear in various formats like "DD MMM YYYY", or with labels like "Date of Issue", "Issue Date", "Issued", etc.
-        7. Identify dates by context - typically issue date comes before expiry date in passport text
-        8. Handle formats like "DD MMM YYYY" (e.g., "06 OCT 2023") and convert to DD-MM-YYYY
+        Extract passport information from the following OCR text and return it as a structured JSON object.
         
         Return ONLY a JSON object with this exact structure:
         {{
@@ -274,7 +473,9 @@ def parse_with_gemini_api(raw_ocr_text):
             "sex": "",
             "date_of_expiry": "",
             "date_of_issue": "",
-            "cnic": ""
+            "cnic": "",
+            "father_name": "",
+            "place_of_stay": ""
         }}
         
         OCR Text to analyze:
@@ -314,10 +515,10 @@ def parse_with_gemini_api(raw_ocr_text):
 
 def parse_ocr_data(raw):
     """
-    Original parsing function - kept as fallback with date_of_issue extraction
+    Enhanced MRZ parsing function with better date_of_issue extraction
     """
     if not raw:
-        return
+        return None
 
     lines = raw.splitlines()
     lines = [line.strip() for line in lines if len(line.strip()) > 0]
@@ -399,19 +600,22 @@ def parse_ocr_data(raw):
                 if date_obj.year >= (current_year - 10) and date_obj.year <= current_year:
                     date_of_issue = all_dates[0][0]
 
+    # Find MRZ lines
     line1, line2 = None, None
     for i in range(len(lines) - 1):
         if is_mrz_line(lines[i]) and is_mrz_line(lines[i + 1]):
             line1 = lines[i]
             line2 = lines[i + 1]
+            break
         elif line1 is None and lines[i][:2] in ['P<', 'D<', 'S<', 'F<']:
             line1 = lines[i]
-            line2 = lines[i + 1]
+            if i + 1 < len(lines):
+                line2 = lines[i + 1]
             break
 
     if not line1 or not line2:
-        frappe.msgprint("Could not detect MRZ lines from OCR output. Please upload a clearer image.")
-        return
+        frappe.msgprint("Could not detect MRZ lines from OCR output. Will try Gemini fallback.")
+        return None
 
     try:
         passport_type = line1[0]
@@ -448,13 +652,13 @@ def parse_ocr_data(raw):
             "sex": sex,
             "date_of_expiry": getdate(expiry) if expiry else None,
             "date_of_issue": getdate(date_of_issue) if date_of_issue else None,
-            "cnic": cnic
+            "cnic": cnic,
+            "father_name": "",  # Will be filled by Gemini
+            "place_of_stay": ""  # Will be filled by Gemini
         }
 
         return parsed_data
 
     except Exception as e:
-        frappe.msgprint(
-            f"Error parsing OCR data: {e}. "
-            "Please upload a clearer image and verify that the cropped area is correctly selected."
-        )
+        frappe.msgprint(f"Error parsing MRZ data: {e}. Will try Gemini fallback.")
+        return None
